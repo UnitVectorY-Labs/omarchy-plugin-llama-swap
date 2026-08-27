@@ -7,11 +7,11 @@ The panel shows active inference requests, lists every configured model in a sta
 ## Requirements
 
 - Omarchy Quattro with shell plugin support
-- `curl`
+- `bash`, `curl`, `awk`, and GNU coreutils (included with Omarchy)
 - A reachable Llama Swap server
 - An optional Llama Swap API key when the server requires authentication
 
-The plugin runs inside Omarchy's long-lived Quickshell process with your user permissions. It does not require `sudo`, install hooks, or a second Quickshell process.
+The plugin runs inside Omarchy's long-lived Quickshell process with your user permissions. It does not require elevated privileges, install hooks, or a second Quickshell process.
 
 ## Install
 
@@ -33,13 +33,15 @@ Set the Llama Swap base URL:
 omarchy bar set io.github.unitvectory-labs.llama-swap url https://llama-swap.example.com
 ```
 
-Authentication is optional. When configured, the token is sent as an `Authorization: Bearer` header:
+Authentication is optional. When configured, the token is sent as an `Authorization: Bearer` header. The plugin passes it to the request helper over standard input, so it is never included in process arguments:
 
 ```sh
 omarchy bar set io.github.unitvectory-labs.llama-swap apiToken YOUR_TOKEN
 ```
 
 Omarchy persists bar-widget settings in `~/.config/omarchy/shell.json`. The API token is therefore stored as plain text and is readable by the local user account. Use a suitably scoped token and do not use this implementation where local plain-text storage is unacceptable.
+
+Remote responses are bounded before they enter Quickshell: model snapshots are limited to 1 MiB, and each event-stream connection is limited to 2 MiB, 512 data records, and 64 KiB per record. Model/request state is capped as a second layer of protection, and server-provided strings are rendered as plain text.
 
 ## Usage
 
@@ -86,6 +88,12 @@ git clone https://github.com/UnitVectorY-Labs/omarchy-plugin-llama-swap.git
 cd omarchy-plugin-llama-swap
 omarchy plugin validate .
 qmllint -I "$OMARCHY_PATH/shell" BarWidget.qml Panel.qml
+```
+
+The bounded request helper has a host-independent integration test:
+
+```sh
+python3 tests/test_request_helper.py
 ```
 
 For live development, symlink the checkout under the permanent plugin ID, rescan, and enable it:

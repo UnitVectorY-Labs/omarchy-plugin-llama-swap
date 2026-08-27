@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.unitvectory-labs.llama-swap",
   "name": "Llama Swap",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "Jared Hatfield",
   "license": "MIT",
   "description": "Monitor active Llama Swap requests and load or unload models from the Omarchy bar.",
