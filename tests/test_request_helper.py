@@ -9,6 +9,8 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 HELPER = ROOT / "lib" / "llama-swap-request"
 TOKEN = "test-token-not-for-argv"
+REQUEST_STARTED = threading.Event()
+RELEASE_REQUEST = threading.Event()
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -20,6 +22,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = b'{"data":[]}'
         elif self.path == "/oversized":
             body = b"x" * (1024 * 1024 + 1)
+        elif self.path == "/blocked":
+            REQUEST_STARTED.set()
+            RELEASE_REQUEST.wait(timeout=5)
+            body = b'{"data":[]}'
         elif self.path == "/events":
             oversized = b"data: " + b"x" * 65536 + b"\n"
             records = [b'data: {"type":"ignored"}\n' for _ in range(600)]
@@ -29,7 +35,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         self.send_response(200)
-        self.send_header("Content-Length", str(len(body)))
+        # The oversized response is delimited only by connection close. This
+        # exercises the cap for streaming/unknown-length transfers.
+        if self.path != "/oversized":
+            self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         try:
             self.wfile.write(body)
@@ -74,6 +83,36 @@ class RequestHelperTest(unittest.TestCase):
         result = self.run_helper("request", "/oversized")
         self.assertNotEqual(result.returncode, 0)
         self.assertLessEqual(len(result.stdout.encode()), 1024 * 1024)
+
+    def test_token_is_absent_from_process_arguments(self):
+        REQUEST_STARTED.clear()
+        RELEASE_REQUEST.clear()
+        process = subprocess.Popen(
+            [str(HELPER), "request", "GET", self.base_url + "/blocked", "5"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            process.stdin.write(TOKEN + "\n")
+            process.stdin.flush()
+            self.assertTrue(REQUEST_STARTED.wait(timeout=3), "request did not start")
+
+            pending = [process.pid]
+            command_lines = []
+            while pending:
+                pid = pending.pop()
+                try:
+                    command_lines.append(pathlib.Path(f"/proc/{pid}/cmdline").read_bytes())
+                    children = pathlib.Path(f"/proc/{pid}/task/{pid}/children").read_text().split()
+                    pending.extend(int(child) for child in children)
+                except (FileNotFoundError, ProcessLookupError):
+                    pass
+            self.assertNotIn(TOKEN.encode(), b"\n".join(command_lines))
+        finally:
+            RELEASE_REQUEST.set()
+            process.communicate(timeout=5)
 
     def test_events_have_line_and_record_caps(self):
         result = self.run_helper("events", "/events")

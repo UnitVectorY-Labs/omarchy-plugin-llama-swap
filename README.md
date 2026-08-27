@@ -7,7 +7,7 @@ The panel shows active inference requests, lists every configured model in a sta
 ## Requirements
 
 - Omarchy Quattro with shell plugin support
-- `bash`, `curl`, and `awk` (included with Omarchy)
+- `bash`, `curl`, `awk`, and GNU coreutils (included with Omarchy)
 - A reachable Llama Swap server
 - An optional Llama Swap API key when the server requires authentication
 

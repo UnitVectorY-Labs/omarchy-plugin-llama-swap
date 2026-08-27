@@ -66,14 +66,16 @@ curl_bounded() {
 }
 
 if [[ "$mode" == "request" ]]; then
-  curl_bounded "$MAX_RESPONSE_BYTES"
+  # The pipe cap also covers older curl versions where --max-filesize only
+  # rejected responses with a known Content-Length.
+  curl_bounded "$MAX_RESPONSE_BYTES" | head -c "$MAX_RESPONSE_BYTES"
   exit $?
 fi
 
 # curl caps the total bytes, including an unterminated line. awk then admits
 # only bounded SSE data records to SplitParser and ends the connection after a
 # bounded record count; Quickshell reconnects to obtain a fresh snapshot.
-curl_bounded "$MAX_EVENT_BYTES" | awk \
+curl_bounded "$MAX_EVENT_BYTES" | head -c "$MAX_EVENT_BYTES" | awk \
   -v max_line="$MAX_EVENT_LINE_BYTES" \
   -v max_records="$MAX_EVENT_RECORDS" '
     /^data:/ && length($0) <= max_line {
