@@ -49,15 +49,23 @@ Panel {
   property double nowMs: Date.now()
   property int page: 0
   readonly property int pageSize: 5
+  readonly property int maxModels: 256
+  readonly property int maxRequests: 128
   readonly property int pageCount: Math.max(1, Math.ceil(models.length / pageSize))
   readonly property var pageModels: models.slice(page * pageSize, Math.min(models.length, (page + 1) * pageSize))
   readonly property var visibleRequests: inFlightRequests.slice(0, 3)
 
+  function helperPath() {
+    return String(Qt.resolvedUrl("lib/llama-swap-request")).replace(/^file:\/\//, "")
+  }
+
   function requestCommand(path, method, maxTime) {
-    var command = ["curl", "-fsS", "--connect-timeout", "4", "--max-time", String(maxTime || 10), "-X", method]
-    if (apiToken !== "") command.push("-H", "Authorization: Bearer " + apiToken)
-    command.push(baseUrl + path)
-    return command
+    return [helperPath(), "request", method, baseUrl + path, String(maxTime || 10)]
+  }
+
+  function writeToken(process) {
+    // The helper consumes exactly one line. Credentials never enter argv.
+    process.write(apiToken + "\n")
   }
 
   function refresh() {
@@ -71,12 +79,13 @@ Panel {
     var payload = JSON.parse(text)
     var rows = payload && payload.data instanceof Array ? payload.data : []
     var primary = []
-    for (var i = 0; i < rows.length; i++) {
+    for (var i = 0; i < rows.length && primary.length < maxModels; i++) {
       var entry = rows[i]
       var kind = entry.meta && entry.meta.llamaswap ? entry.meta.llamaswap.type : "model"
-      if (kind !== "alias") primary.push({
-        id: String(entry.id || ""),
-        name: String(entry.name || entry.id || ""),
+      var id = String(entry.id || "")
+      if (kind !== "alias" && id.length > 0 && id.length <= 512) primary.push({
+        id: id,
+        name: String(entry.name || entry.id || "").slice(0, 512),
         loaded: entry.status && entry.status.value === "loaded"
       })
     }
@@ -116,10 +125,7 @@ Panel {
   }
 
   function eventCommand() {
-    var command = ["curl", "-NsS", "--connect-timeout", "4"]
-    if (apiToken !== "") command.push("-H", "Authorization: Bearer " + apiToken)
-    command.push(baseUrl + "/api/events")
-    return command
+    return [helperPath(), "events", "GET", baseUrl + "/api/events", "0"]
   }
 
   function startEvents() {
@@ -145,19 +151,27 @@ Panel {
       var update = JSON.parse(envelope.data)
       var next = inFlightRequests.slice()
       if (update.operation === "snapshot") {
-        next = update.requests || []
+        next = []
+        var requests = update.requests instanceof Array ? update.requests : []
+        for (var snapshotIndex = 0; snapshotIndex < requests.length && next.length < maxRequests; snapshotIndex++) {
+          var snapshotRequest = boundedRequest(requests[snapshotIndex])
+          if (snapshotRequest) next.push(snapshotRequest)
+        }
       } else if (update.operation === "upsert" && update.request) {
+        var bounded = boundedRequest(update.request)
+        if (!bounded) return
         var replaced = false
         for (var i = 0; i < next.length; i++) {
-          if (next[i].id === update.request.id) {
-            next[i] = update.request
+          if (next[i].id === bounded.id) {
+            next[i] = bounded
             replaced = true
             break
           }
         }
-        if (!replaced) next.push(update.request)
+        if (!replaced && next.length < maxRequests) next.push(bounded)
       } else if (update.operation === "remove") {
-        next = next.filter(function(request) { return request.id !== update.id })
+        var removedId = String(update.id || "").slice(0, 256)
+        next = next.filter(function(request) { return request.id !== removedId })
       }
       next.sort(function(a, b) {
         var byTime = Date.parse(a.timestamp) - Date.parse(b.timestamp)
@@ -166,6 +180,18 @@ Panel {
       inFlightRequests = next
     } catch (error) {
       // Other SSE messages and incomplete lines do not affect request state.
+    }
+  }
+
+  function boundedRequest(request) {
+    if (!request) return null
+    var id = String(request.id || "")
+    if (id.length === 0 || id.length > 256) return null
+    return {
+      id: id,
+      timestamp: String(request.timestamp || "").slice(0, 128),
+      model: String(request.model || "Unknown model").slice(0, 512),
+      req_path: String(request.req_path || "request").slice(0, 1024)
     }
   }
 
@@ -201,7 +227,9 @@ Panel {
 
   Process {
     id: modelsProcess
+    stdinEnabled: true
     stdout: StdioCollector { id: modelsOutput; waitForEnd: true }
+    onStarted: root.writeToken(modelsProcess)
     onExited: function(exitCode) {
       root.refreshing = false
       if (exitCode !== 0) {
@@ -215,7 +243,9 @@ Panel {
 
   Process {
     id: eventsProcess
+    stdinEnabled: true
     stdout: SplitParser { onRead: function(line) { root.handleEventLine(String(line)) } }
+    onStarted: root.writeToken(eventsProcess)
     onExited: function(exitCode) {
       if (root.opened && root.configured) eventsRestart.restart()
     }
@@ -236,6 +266,8 @@ Panel {
 
   Process {
     id: actionProcess
+    stdinEnabled: true
+    onStarted: root.writeToken(actionProcess)
     onExited: function(exitCode) {
       if (exitCode !== 0) root.lastError = "Model action failed"
       root.actionModel = ""
@@ -357,6 +389,7 @@ Panel {
                 anchors.rightMargin: Style.space(10)
                 anchors.verticalCenter: parent.verticalCenter
                 text: String(requestRow.modelData.model || "Unknown model")
+                textFormat: Text.PlainText
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -369,6 +402,7 @@ Panel {
                 anchors.rightMargin: Style.space(10)
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.elapsedText(requestRow.modelData) + "  ·  " + String(requestRow.modelData.req_path || "request")
+                textFormat: Text.PlainText
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -424,6 +458,7 @@ Panel {
                 anchors.rightMargin: Style.space(10)
                 anchors.verticalCenter: parent.verticalCenter
                 text: modelRow.modelData.name
+                textFormat: Text.PlainText
                 color: modelRow.modelData.loaded ? root.foreground : root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body

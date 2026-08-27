@@ -1,0 +1,85 @@
+#!/bin/bash
+# Keep credentials out of process arguments and bound all remote output before
+# it reaches Quickshell's long-lived QML process.
+set -o pipefail
+export LC_ALL=C
+
+MAX_RESPONSE_BYTES=1048576
+MAX_EVENT_BYTES=2097152
+MAX_EVENT_LINE_BYTES=65536
+MAX_EVENT_RECORDS=512
+
+mode=${1:-}
+method=${2:-}
+url=${3:-}
+max_time=${4:-}
+
+case "$mode" in
+  request|events) ;;
+  *) exit 2 ;;
+esac
+case "$method" in
+  GET|POST) ;;
+  *) exit 2 ;;
+esac
+case "$url" in
+  http://*|https://*) ;;
+  *) exit 2 ;;
+esac
+case "$max_time" in
+  ""|*[!0-9]*) exit 2 ;;
+esac
+
+# QML writes one token line to this process after it starts. The token remains
+# absent from this script's argv and curl's argv. Reject carriage returns so a
+# locally malformed setting cannot inject another header into curl's stdin.
+IFS= read -r token || token=""
+case "$token" in
+  *$'\r'*) exit 2 ;;
+esac
+
+curl_bounded() {
+  local byte_limit=$1
+  local -a args=(
+    --disable
+    --fail
+    --silent
+    --show-error
+    --connect-timeout 4
+    --max-filesize "$byte_limit"
+    --request "$method"
+  )
+
+  if [[ "$max_time" -gt 0 ]]; then
+    args+=(--max-time "$max_time")
+  fi
+  if [[ "$mode" == "events" ]]; then
+    args+=(--no-buffer)
+  fi
+
+  if [[ -n "$token" ]]; then
+    printf 'Authorization: Bearer %s\n' "$token" \
+      | curl "${args[@]}" --header @- "$url"
+  else
+    curl "${args[@]}" "$url"
+  fi
+}
+
+if [[ "$mode" == "request" ]]; then
+  curl_bounded "$MAX_RESPONSE_BYTES"
+  exit $?
+fi
+
+# curl caps the total bytes, including an unterminated line. awk then admits
+# only bounded SSE data records to SplitParser and ends the connection after a
+# bounded record count; Quickshell reconnects to obtain a fresh snapshot.
+curl_bounded "$MAX_EVENT_BYTES" | awk \
+  -v max_line="$MAX_EVENT_LINE_BYTES" \
+  -v max_records="$MAX_EVENT_RECORDS" '
+    /^data:/ && length($0) <= max_line {
+      print
+      fflush()
+      records++
+      if (records >= max_records) exit
+    }
+  '
