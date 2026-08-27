@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.unitvectory-labs.llama-swap",
+  "name": "Llama Swap",
+  "version": "0.1.0",
+  "author": "Jared Hatfield",
+  "license": "MIT",
+  "description": "Monitor active Llama Swap requests and load or unload models from the Omarchy bar.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Llama Swap",
+    "description": "Monitor active requests and control loaded Llama Swap models.",
+    "category": "AI",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "url": "",
+      "apiToken": ""
+    },
+    "schema": [
+      {
+        "key": "url",
+        "type": "string",
+        "label": "Llama Swap URL",
+        "defaultValue": "",
+        "description": "Base URL, for example https://llama-swap.example.com."
+      },
+      {
+        "key": "apiToken",
+        "type": "string",
+        "label": "API token (optional)",
+        "defaultValue": "",
+        "description": "Sent as Authorization: Bearer <token>. Leave blank for an unauthenticated server."
+      }
+    ]
+  }
+}
