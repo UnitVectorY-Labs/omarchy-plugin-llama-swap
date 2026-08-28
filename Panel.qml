@@ -43,17 +43,13 @@ Panel {
   property var loadedModels: []
   property string lastError: ""
   property bool refreshing: false
-  property string actionModel: ""
   property var inFlightRequests: []
   property bool eventConnected: false
   property double nowMs: Date.now()
-  property int page: 0
-  readonly property int pageSize: 5
   readonly property int maxModels: 256
   readonly property int maxRequests: 128
-  readonly property int pageCount: Math.max(1, Math.ceil(models.length / pageSize))
-  readonly property var pageModels: models.slice(page * pageSize, Math.min(models.length, (page + 1) * pageSize))
   readonly property var visibleRequests: inFlightRequests.slice(0, 3)
+  readonly property var visibleLoadedModels: loadedModels.slice(0, 2)
 
   function helperPath() {
     return String(Qt.resolvedUrl("lib/llama-swap-request")).replace(/^file:\/\//, "")
@@ -83,11 +79,21 @@ Panel {
       var entry = rows[i]
       var kind = entry.meta && entry.meta.llamaswap ? entry.meta.llamaswap.type : "model"
       var id = String(entry.id || "")
-      if (kind !== "alias" && id.length > 0 && id.length <= 512) primary.push({
-        id: id,
-        name: String(entry.name || entry.id || "").slice(0, 512),
-        loaded: entry.status && entry.status.value === "loaded"
-      })
+      if (kind !== "alias" && id.length > 0 && id.length <= 512) {
+        var loaded = entry.status && entry.status.value === "loaded"
+        for (var pendingIndex = 0; pendingIndex < pendingActions.count; pendingIndex++) {
+          var pending = pendingActions.get(pendingIndex)
+          if (pending.modelId === id) {
+            loaded = pending.desiredLoaded
+            break
+          }
+        }
+        primary.push({
+          id: id,
+          name: String(entry.name || entry.id || "").slice(0, 512),
+          loaded: loaded
+        })
+      }
     }
 
     // Match Llama Swap's UI ordering. State is not part of the key, so
@@ -97,21 +103,64 @@ Panel {
     })
 
     models = primary
+    syncModelRows(primary)
     loadedModels = primary.filter(function(model) { return model.loaded })
-    page = Math.min(page, Math.max(0, Math.ceil(primary.length / pageSize) - 1))
     lastError = ""
   }
 
+  function syncModelRows(next) {
+    var stable = modelList.count === next.length
+    if (stable) {
+      for (var i = 0; i < next.length; i++) {
+        if (modelList.get(i).modelId !== next[i].id) {
+          stable = false
+          break
+        }
+      }
+    }
+
+    if (!stable) {
+      modelList.clear()
+      for (var appendIndex = 0; appendIndex < next.length; appendIndex++) {
+        modelList.append({
+          modelId: next[appendIndex].id,
+          modelName: next[appendIndex].name,
+          loaded: next[appendIndex].loaded
+        })
+      }
+      return
+    }
+
+    // Updating roles in place preserves ListView identity and contentY. A
+    // JavaScript-array replacement makes Qt rebuild the model and jump to top.
+    for (var updateIndex = 0; updateIndex < next.length; updateIndex++) {
+      var current = modelList.get(updateIndex)
+      if (current.modelName !== next[updateIndex].name)
+        modelList.setProperty(updateIndex, "modelName", next[updateIndex].name)
+      if (current.loaded !== next[updateIndex].loaded)
+        modelList.setProperty(updateIndex, "loaded", next[updateIndex].loaded)
+    }
+  }
+
   function toggleModel(model) {
-    if (!configured || actionProcess.running || !model) return
+    if (!configured || !connected || !model || isModelPending(model.id)) return
     var desiredLoaded = !model.loaded
-    actionModel = model.id
     setModelLoaded(model.id, desiredLoaded)
-    if (!desiredLoaded)
-      actionProcess.command = requestCommand("/api/models/unload/" + encodeURIComponent(model.id), "POST", 30)
-    else
-      actionProcess.command = requestCommand("/upstream/" + encodeURIComponent(model.id) + "/", "GET", 600)
-    actionProcess.running = true
+    pendingActions.append({ modelId: model.id, desiredLoaded: desiredLoaded })
+  }
+
+  function isModelPending(id) {
+    for (var i = 0; i < pendingActions.count; i++)
+      if (pendingActions.get(i).modelId === id) return true
+    return false
+  }
+
+  function finishAction(id, exitCode) {
+    for (var i = pendingActions.count - 1; i >= 0; i--) {
+      if (pendingActions.get(i).modelId === id) pendingActions.remove(i)
+    }
+    if (exitCode !== 0) lastError = "Model action failed"
+    refreshAfterAction.restart()
   }
 
   function setModelLoaded(id, loaded) {
@@ -121,6 +170,7 @@ Panel {
       next.push({ id: model.id, name: model.name, loaded: model.id === id ? loaded : model.loaded })
     }
     models = next
+    syncModelRows(next)
     loadedModels = next.filter(function(model) { return model.loaded })
   }
 
@@ -203,10 +253,6 @@ Panel {
     return Math.floor(seconds / 60) + "m " + (seconds % 60) + "s"
   }
 
-  function changePage(delta) {
-    page = Math.max(0, Math.min(pageCount - 1, page + delta))
-  }
-
   onOpenedChanged: {
     if (opened) {
       nowMs = Date.now()
@@ -218,8 +264,9 @@ Panel {
   }
   onConfiguredChanged: {
     models = []
+    modelList.clear()
     loadedModels = []
-    page = 0
+    pendingActions.clear()
     lastError = ""
     if (opened && configured) startEvents()
     else stopEvents()
@@ -264,14 +311,26 @@ Panel {
     onTriggered: root.nowMs = Date.now()
   }
 
-  Process {
-    id: actionProcess
-    stdinEnabled: true
-    onStarted: root.writeToken(actionProcess)
-    onExited: function(exitCode) {
-      if (exitCode !== 0) root.lastError = "Model action failed"
-      root.actionModel = ""
-      refreshAfterAction.restart()
+  ListModel { id: modelList }
+  ListModel { id: pendingActions }
+
+  Instantiator {
+    model: pendingActions
+
+    delegate: Process {
+      id: actionProcess
+      required property string modelId
+      required property bool desiredLoaded
+      stdinEnabled: true
+      command: desiredLoaded
+        ? root.requestCommand("/upstream/" + encodeURIComponent(modelId) + "/", "GET", 600)
+        : root.requestCommand("/api/models/unload/" + encodeURIComponent(modelId), "POST", 30)
+      running: true
+      onStarted: root.writeToken(actionProcess)
+      onExited: function(exitCode) {
+        var completedId = modelId
+        Qt.callLater(function() { root.finishAction(completedId, exitCode) })
+      }
     }
   }
 
@@ -294,7 +353,6 @@ Panel {
       anchors.fill: parent
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
-      onMoveRequested: function(dx, dy) { if (dx !== 0) root.changePage(dx) }
 
       Column {
         id: content
@@ -334,6 +392,82 @@ Panel {
           }
         }
 
+        Row {
+          id: loadedPills
+          readonly property int pillHeight: Style.font.caption + Style.space(6)
+          visible: root.configured
+          width: parent.width
+          height: visible ? pillHeight : 0
+          spacing: Style.space(6)
+
+          Rectangle {
+            visible: root.loadedCount === 0
+            width: noModelsLabel.implicitWidth + Style.space(14)
+            height: loadedPills.pillHeight
+            radius: height / 2
+            color: "transparent"
+            border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.2)
+            border.width: 1
+
+            Text {
+              id: noModelsLabel
+              anchors.centerIn: parent
+              text: "None loaded"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+          }
+
+          Repeater {
+            model: root.visibleLoadedModels
+
+            Rectangle {
+              id: modelPill
+              required property var modelData
+              width: Math.min(Style.space(150), pillLabel.implicitWidth + Style.space(14))
+              height: loadedPills.pillHeight
+              radius: height / 2
+              color: Style.normalFillFor(root.foreground, Color.accent)
+              border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.28)
+              border.width: 1
+
+              Text {
+                id: pillLabel
+                anchors.fill: parent
+                anchors.leftMargin: Style.space(7)
+                anchors.rightMargin: Style.space(7)
+                text: modelPill.modelData.name
+                textFormat: Text.PlainText
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+                verticalAlignment: Text.AlignVCenter
+              }
+            }
+          }
+
+          Rectangle {
+            visible: root.loadedCount > root.visibleLoadedModels.length
+            width: overflowLabel.implicitWidth + Style.space(14)
+            height: loadedPills.pillHeight
+            radius: height / 2
+            color: "transparent"
+            border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.2)
+            border.width: 1
+
+            Text {
+              id: overflowLabel
+              anchors.centerIn: parent
+              text: "+" + (root.loadedCount - root.visibleLoadedModels.length)
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+          }
+        }
+
         Text {
           visible: !root.configured || root.lastError !== ""
           width: parent.width
@@ -362,7 +496,7 @@ Panel {
           visible: root.configured && (!root.eventConnected || root.inFlightRequests.length === 0)
           width: parent.width
           leftPadding: Style.space(10)
-          text: root.eventConnected ? "No requests running" : "Connecting…"
+          text: "No active requests"
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
@@ -433,89 +567,62 @@ Panel {
           fontFamily: root.fontFamily
         }
 
-        Column {
+        ListView {
           id: modelRows
           visible: root.models.length > 0
           width: parent.width
-          spacing: Style.space(4)
+          height: Math.min(contentHeight, Style.space(300))
+          spacing: Style.space(2)
+          clip: true
+          boundsBehavior: Flickable.StopAtBounds
+          interactive: contentHeight > height
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+          model: modelList
 
-          Repeater {
-            model: root.pageModels
+          delegate: BorderSurface {
+            id: modelRow
+            required property string modelId
+            required property string modelName
+            required property bool loaded
+            width: ListView.view.width
+            height: Style.space(32)
+            color: "transparent"
+            borderSpec: Border.none()
+            radius: Style.cornerRadius
 
-            BorderSurface {
-              id: modelRow
-              required property var modelData
-              width: modelRows.width
-              implicitHeight: Style.space(42)
-              color: "transparent"
-              borderSpec: Border.none()
-              radius: Style.cornerRadius
-
-              Text {
-                anchors.left: parent.left
-                anchors.right: modelSwitch.left
-                anchors.leftMargin: Style.space(10)
-                anchors.rightMargin: Style.space(10)
-                anchors.verticalCenter: parent.verticalCenter
-                text: modelRow.modelData.name
-                textFormat: Text.PlainText
-                color: modelRow.modelData.loaded ? root.foreground : root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-                elide: Text.ElideRight
-              }
-
-              ToggleSwitch {
-                id: modelSwitch
-                anchors.right: parent.right
-                anchors.rightMargin: Style.space(4)
-                anchors.verticalCenter: parent.verticalCenter
-                checked: modelRow.modelData.loaded
-                busy: root.actionModel === modelRow.modelData.id
-                interactive: root.actionModel === "" && root.connected
-                // Keep the geometry fixed while an API action disables input.
-                cursorRing: true
-                foreground: root.foreground
-                accent: Color.accent
-                onToggled: root.toggleModel(modelRow.modelData)
-              }
+            Text {
+              anchors.left: parent.left
+              anchors.right: modelSwitch.left
+              anchors.leftMargin: Style.space(8)
+              anchors.rightMargin: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+              text: modelRow.modelName
+              textFormat: Text.PlainText
+              color: modelRow.loaded ? root.foreground : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              elide: Text.ElideRight
             }
-          }
-        }
 
-        Row {
-          visible: root.pageCount > 1
-          anchors.horizontalCenter: parent.horizontalCenter
-          spacing: Style.space(10)
-
-          Button {
-            text: "Previous"
-            bordered: true
-            enabled: root.page > 0
-            opacity: enabled ? 1 : 0.4
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            fontSize: Style.font.bodySmall
-            onClicked: root.changePage(-1)
-          }
-
-          Text {
-            anchors.verticalCenter: parent.verticalCenter
-            text: (root.page + 1) + " / " + root.pageCount
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-          }
-
-          Button {
-            text: "Next"
-            bordered: true
-            enabled: root.page < root.pageCount - 1
-            opacity: enabled ? 1 : 0.4
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            fontSize: Style.font.bodySmall
-            onClicked: root.changePage(1)
+            ToggleSwitch {
+              id: modelSwitch
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(2)
+              anchors.verticalCenter: parent.verticalCenter
+              checked: modelRow.loaded
+              busy: root.isModelPending(modelRow.modelId)
+              interactive: root.connected && !busy
+              cursorRing: true
+              cursorPad: Style.space(2)
+              trackHeight: Style.space(22)
+              foreground: root.foreground
+              accent: Color.accent
+              onToggled: root.toggleModel({
+                id: modelRow.modelId,
+                name: modelRow.modelName,
+                loaded: modelRow.loaded
+              })
+            }
           }
         }
 
