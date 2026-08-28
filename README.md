@@ -2,7 +2,7 @@
 
 An [Omarchy Quattro](https://omarchy.org/) bar plugin for monitoring and controlling a [Llama Swap](https://github.com/mostlygeek/llama-swap) server.
 
-The panel shows active inference requests, lists every configured model in a stable paginated view, and lets you load or unload models with immediate, optimistic switches.
+The panel shows active inference requests, lists every configured model in a compact scrolling view, and lets you load or unload multiple models with immediate, optimistic switches.
 
 ## Requirements
 
@@ -48,9 +48,9 @@ Remote responses are bounded before they enter Quickshell: model snapshots are l
 Click the llama icon to open or close the panel. Press Escape or click outside the panel to close it.
 
 - Models retain the same name/ID ordering used by Llama Swap's interface.
-- Five models are shown per page; Previous and Next navigate without a scrolling list.
-- A model switch moves immediately, while its load or unload operation continues asynchronously.
-- Left and right arrow keys change model pages while the panel has focus.
+- Models appear in a compact scrollable list, consistent with Omarchy's Wi-Fi and Bluetooth panels.
+- Model switches move immediately, and load or unload operations for different models can run independently.
+- Loaded model names appear as compact pills beneath the panel header; additional names collapse into a count.
 
 ### Connection lifecycle
 
